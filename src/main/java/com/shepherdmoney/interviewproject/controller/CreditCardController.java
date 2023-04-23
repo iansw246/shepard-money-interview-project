@@ -16,8 +16,10 @@ import org.springframework.web.bind.annotation.*;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
-import java.time.temporal.ChronoUnit;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
 
 
 @RestController
@@ -64,7 +66,7 @@ public class CreditCardController {
         User user = optionalUser.get();
         return ResponseEntity.ok(user.getCreditCardList()
                 .stream().map(
-                    card -> new CreditCardView(card.getIssuanceBank(), card.getNumber())
+                        card -> new CreditCardView(card.getIssuanceBank(), card.getNumber())
                 ).toList());
     }
 
@@ -101,88 +103,117 @@ public class CreditCardController {
             double transactionAmount = transaction.getTransactionAmount();
 
             // If transaction is on the most recent date, then only need to update that most recent transaction
-            if (datesAreOnSameDay(transaction.getTransactionTime().atZone(ZoneOffset.UTC), mostRecentHistory.getDate().atZone(ZoneOffset.UTC))) {
+            ZonedDateTime transactionZonedDateTime = transaction.getTransactionTime().atZone(ZoneOffset.UTC);
+            if (datesAreOnSameDay(transactionZonedDateTime, mostRecentHistory.getDate().atZone(ZoneOffset.UTC))) {
                 mostRecentHistory.setBalance(mostRecentHistory.getBalance() + transactionAmount);
             } else {
                 // Otherwise, may need to add balance histories in between update date and existing dates
 
                 Instant now = Instant.now();
                 if (transaction.getTransactionTime().isAfter(now)) {
-                    return ResponseEntity.badRequest().build();
+                    return ResponseEntity.badRequest().body("Transaction is in the future.");
                 }
 
-                Iterator<BalanceHistory> balanceHistoryIterator = oldBalanceHistories.iterator();
-                BalanceHistory previousBalanceHistory = balanceHistoryIterator.next();
+
+                BalanceHistory transactionBalanceHistory = new BalanceHistory();
+                transactionBalanceHistory.setCard(cardToUpdate);
+                transactionBalanceHistory.setDate(transaction.getTransactionTime());
+
+                boolean transactionBalanceHistoryAdded = false;
+
+                // Insert transaction history into correct position in oldBalanceHistories
+                for (int i = 0; i < oldBalanceHistories.size(); i++) {
+                    BalanceHistory currentBalanceHistory = oldBalanceHistories.get(i);
+                    if (datesAreOnSameDay(currentBalanceHistory.getDate().atZone(ZoneOffset.UTC),
+                            transactionZonedDateTime)) {
+                        currentBalanceHistory.setBalance(currentBalanceHistory.getBalance());
+                        transactionBalanceHistory = currentBalanceHistory;
+                        transactionBalanceHistoryAdded = true;
+                        break;
+                    } else if (currentBalanceHistory.getDate().isBefore(transaction.getTransactionTime())) {
+                        // We know current and transaction occurred on different dates, so if current is before,
+                        // transaction must be inserted here
+
+                        transactionBalanceHistory.setBalance(currentBalanceHistory.getBalance());
+                        oldBalanceHistories.add(i, transactionBalanceHistory);
+                        transactionBalanceHistoryAdded = true;
+                        break;
+                    }
+                }
+
+                // Insert at end if it is after all existing balance histories
+                // If it wasn't added in between any existing balance histories
+                if (!transactionBalanceHistoryAdded) {
+                    oldBalanceHistories.add(transactionBalanceHistory);
+                }
+
+                // Fill in dates between existing dates
+
                 ArrayList<BalanceHistory> newBalanceHistories = new ArrayList<>();
+
+                Iterator<BalanceHistory> oldBalanceHistoryIterator = oldBalanceHistories.iterator();
+
+                // First entry must be today, so no possible gaps in dates
+                BalanceHistory previousBalanceHistory = oldBalanceHistoryIterator.next();
                 newBalanceHistories.add(previousBalanceHistory);
                 previousBalanceHistory.setBalance(previousBalanceHistory.getBalance() + transactionAmount);
 
-                boolean needToAddLastTransaction = true;
-
-                while (balanceHistoryIterator.hasNext()) {
-                    BalanceHistory olderHistory = balanceHistoryIterator.next();
-
-                    // If day of transaction found, no need to modify older balance histories
-                    if (datesAreOnSameDay(olderHistory.getDate().atZone(ZoneOffset.UTC), transaction.getTransactionTime().atZone(ZoneOffset.UTC))) {
-                        newBalanceHistories.add(olderHistory);
-                        olderHistory.setBalance(olderHistory.getBalance() + transactionAmount);
-                        // Add remaining, older balance histories without modification
-                        while (balanceHistoryIterator.hasNext()) {
-                            newBalanceHistories.add(balanceHistoryIterator.next());
-                        }
-                        needToAddLastTransaction = false;
+                while (oldBalanceHistoryIterator.hasNext()) {
+                    BalanceHistory currentBalanceHistory = oldBalanceHistoryIterator.next();
+                    // If we reach the date of the transaction, can stop modifying balances
+                    if (currentBalanceHistory.equals(transactionBalanceHistory)) {
+                        currentBalanceHistory.setBalance(currentBalanceHistory.getBalance() + transactionAmount);
+                        addInBetweenBalanceHistories(newBalanceHistories, cardToUpdate,
+                                currentBalanceHistory.getDate(), previousBalanceHistory.getDate(),
+                                currentBalanceHistory.getBalance());
+                        newBalanceHistories.add(currentBalanceHistory);
+                        // Add remaining balances unchanged since they are after the transaction date
+                        oldBalanceHistoryIterator.forEachRemaining(newBalanceHistories::add);
                         break;
                     }
-                    addInBetweenBalanceHistories(newBalanceHistories, cardToUpdate, transaction.getTransactionTime(), previousBalanceHistory.getDate(), transactionAmount);
-
-                    newBalanceHistories.add(olderHistory);
-                    olderHistory.setBalance(olderHistory.getBalance() + transactionAmount);
-
-                    previousBalanceHistory = olderHistory;
-                }
-
-                if (needToAddLastTransaction) {
-                    addInBetweenBalanceHistories(newBalanceHistories, cardToUpdate, transaction.getTransactionTime(), previousBalanceHistory.getDate(), transactionAmount);
-
-                    BalanceHistory oldestBalanceHistory = new BalanceHistory();
-                    oldestBalanceHistory.setBalance(transactionAmount);
-                    oldestBalanceHistory.setCard(cardToUpdate);
-                    oldestBalanceHistory.setDate(transaction.getTransactionTime());
-
-                    newBalanceHistories.add(oldestBalanceHistory);
+                    addInBetweenBalanceHistories(newBalanceHistories, cardToUpdate, currentBalanceHistory.getDate(),
+                            previousBalanceHistory.getDate(), currentBalanceHistory.getBalance() + transactionAmount);
+                    newBalanceHistories.add(currentBalanceHistory);
+                    currentBalanceHistory.setBalance(currentBalanceHistory.getBalance() + transactionAmount);
+                    previousBalanceHistory = currentBalanceHistory;
                 }
 
                 cardToUpdate.setBalanceHistory(newBalanceHistories);
             }
 
-
             creditCardRepository.save(cardToUpdate);
         }
-        
+
         return ResponseEntity.ok("Ok");
     }
 
     /**
      * Add balance histories to given list for dates between startDate and endDate.
      * Does not add balance histories for the startDate and endDate.
+     *
      * @param balanceHistories List to add to.
-     * @param cardToUpdate Credit card to add balances histories to.
-     * @param startDate starting date.
-     * @param endDate ending date.
-     * @param amount Balance amount of each balance history to add.
+     * @param cardToUpdate     Credit card to add balances histories to.
+     * @param startDate        starting date.
+     * @param endDate          ending date.
+     * @param amount           Balance amount of each balance history to add.
      */
-    private void addInBetweenBalanceHistories(List<BalanceHistory> balanceHistories, CreditCard cardToUpdate, Instant startDate, Instant endDate, double amount) {
-        for (int dayOffset = 1; dayOffset < ChronoUnit.DAYS.between(startDate, endDate); dayOffset++) {
+    private void addInBetweenBalanceHistories(List<BalanceHistory> balanceHistories, CreditCard cardToUpdate,
+                                              Instant startDate, Instant endDate, double amount) {
+        ZonedDateTime currentDateTime = startDate.atZone(ZoneOffset.UTC).plusDays(1);
+        ZonedDateTime endDateTime = endDate.atZone(ZoneOffset.UTC);
+        while (currentDateTime.isBefore(endDateTime) && !datesAreOnSameDay(currentDateTime, endDateTime)) {
             BalanceHistory newInBetweenBalanceHistory = new BalanceHistory();
             newInBetweenBalanceHistory.setCard(cardToUpdate);
             newInBetweenBalanceHistory.setBalance(amount);
-            newInBetweenBalanceHistory.setDate(endDate.atOffset(ZoneOffset.UTC).minusDays(dayOffset).toInstant());
+            newInBetweenBalanceHistory.setDate(currentDateTime.toInstant());
             balanceHistories.add(newInBetweenBalanceHistory);
+            currentDateTime = currentDateTime.plusDays(1);
         }
     }
 
     /**
      * Creates a balance history for the current day if it does not already exist in the given card.
+     *
      * @param card Credit card to add today's balance to.
      */
     private void populateTodayBalanceIfNotExist(CreditCard card) {
@@ -190,11 +221,11 @@ public class CreditCardController {
         if (balanceHistory == null) {
             balanceHistory = new ArrayList<>();
         }
+
         if (balanceHistory.isEmpty()) {
             BalanceHistory todayBalance = new BalanceHistory();
             todayBalance.setCard(card);
             todayBalance.setDate(Instant.now());
-            // No transactions since mostRecentHistory, so balance is still same
             todayBalance.setBalance(0);
 
             balanceHistory.add(0, todayBalance);
@@ -206,8 +237,8 @@ public class CreditCardController {
                 BalanceHistory todayBalance = new BalanceHistory();
                 todayBalance.setCard(card);
                 todayBalance.setDate(Instant.now());
-                // No transactions since mostRecentHistory, so balance is still same
-                todayBalance.setBalance(0);
+                // No transactions since mostRecentHistory, so balance is still same as before
+                todayBalance.setBalance(mostRecentHistory.getBalance());
 
                 balanceHistory.add(0, todayBalance);
                 card.setBalanceHistory(balanceHistory);
@@ -219,6 +250,7 @@ public class CreditCardController {
      * Checks whether two DateTimes are on the same day in terms of day of year. This is not day of week.
      * For example, two dates with the date being 2023-04-22 would return true.
      * Dates 2023-05-22 and 2023-02-22 would return false.
+     *
      * @param date1 First date to check.
      * @param date2 Second date to check.
      * @return True if DatTimes are on the same day. False otherwise.

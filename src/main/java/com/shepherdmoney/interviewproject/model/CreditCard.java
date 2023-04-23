@@ -9,8 +9,7 @@ import org.hibernate.annotations.Cascade;
 
 import java.util.List;
 
-import static org.hibernate.annotations.CascadeType.MERGE;
-import static org.hibernate.annotations.CascadeType.PERSIST;
+import static org.hibernate.annotations.CascadeType.*;
 
 @Entity
 @Getter
@@ -32,6 +31,6 @@ public class CreditCard {
 
     @OneToMany(mappedBy = "card")
     @OrderBy(value = "date DESC")
-    @Cascade({MERGE, PERSIST})
+    @Cascade(ALL)
     private List<BalanceHistory> balanceHistory;
 }
