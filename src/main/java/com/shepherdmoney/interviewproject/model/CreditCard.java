@@ -5,8 +5,12 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
+import org.hibernate.annotations.Cascade;
 
 import java.util.List;
+
+import static org.hibernate.annotations.CascadeType.MERGE;
+import static org.hibernate.annotations.CascadeType.PERSIST;
 
 @Entity
 @Getter
@@ -23,20 +27,11 @@ public class CreditCard {
 
     private String number;
 
-    // TODO: Credit card's owner. For detailed hint, please see User class
     @ManyToOne
     User owner;
 
-    // TODO: Credit card's balance history. It is a requirement that the dates in the balanceHistory 
-    //       list must be in chronological order, with the most recent date appearing first in the list. 
-    //       Additionally, the first object in the list must have a date value that matches today's date, 
-    //       since it represents the current balance of the credit card. For example:
-    //       [
-    //         {date: '2023-04-13', balance: 1500},
-    //         {date: '2023-04-12', balance: 1200},
-    //         {date: '2023-04-11', balance: 1000},
-    //         {date: '2023-04-10', balance: 800}
-    //       ]
-    @OneToMany
+    @OneToMany(mappedBy = "card")
+    @OrderBy(value = "date DESC")
+    @Cascade({MERGE, PERSIST})
     private List<BalanceHistory> balanceHistory;
 }
